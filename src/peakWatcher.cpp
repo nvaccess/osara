@@ -30,6 +30,7 @@ const int PW_NUM_CHANNELS = 2;
 struct {
 	MediaTrack* track;
 	bool follow;
+	unsigned int levelType;
 	struct {
 		double peak;
 		DWORD time;
@@ -122,14 +123,13 @@ const struct {
 };
 constexpr unsigned int PW_NUM_LEVEL_TYPES = sizeof(PW_LEVEL_TYPES) /
 	sizeof(PW_LEVEL_TYPES[0]);
-unsigned int pw_levelType = 0; // Default to peak dB
 
 void pw_resetTrack(int trackIndex, bool report=false) {
 	auto& pwTrack = pw_tracks[trackIndex];
 	for (int c = 0; c < PW_NUM_CHANNELS; ++c) {
 		pwTrack.channels[c].peak = -150;
 	}
-	auto& levelType = PW_LEVEL_TYPES[pw_levelType];
+	auto& levelType = PW_LEVEL_TYPES[pwTrack.levelType];
 	if (pwTrack.track && levelType.reset) {
 		levelType.reset(pwTrack.track);
 	}
@@ -148,9 +148,9 @@ void pw_resetTrack(int trackIndex, bool report=false) {
 void CALLBACK pw_watcher(HWND hwnd, UINT msg, UINT_PTR event, DWORD time) {
 	ostringstream s;
 	s << fixed << setprecision(1);
-	auto& levelType = PW_LEVEL_TYPES[pw_levelType];
 	for (int t = 0; t < PW_NUM_TRACKS; ++t) {
 		auto& pwTrack = pw_tracks[t];
+		auto& levelType = PW_LEVEL_TYPES[pwTrack.levelType];
 		if (!pwTrack.track && !pwTrack.follow)
 			continue; // Disabled.
 		MediaTrack* currentTrack = GetLastTouchedTrack();
@@ -224,13 +224,6 @@ void pw_stop() {
 }
 
 void pw_onOk(HWND dialog) {
-	// Retrieve the level type.
-	HWND typeSel = GetDlgItem(dialog, ID_PEAK_TYPE);
-	unsigned int newType = ComboBox_GetCurSel(typeSel);
-	bool typeChanged = newType != pw_levelType;
-	// Don't set pw_levelType here because we might need to reset tracks, which
-	// depends on knowing the old type. We'll set it later.
-
 	// Retrieve the notification state for channels.
 	for (int c = 0; c < PW_NUM_CHANNELS; ++c) {
 		pw_notifyChannels[c] = IsDlgButtonChecked(dialog, ID_PEAK_CHAN1 + c) == BST_CHECKED;
@@ -259,10 +252,16 @@ void pw_onOk(HWND dialog) {
 	// If there was a change, reset.
 	pw_numTracksEnabled = 0;
 	for (int t = 0; t < PW_NUM_TRACKS; ++t) {
-		int id = ID_PEAK_TRACK1 + t;
-		HWND trackSel = GetDlgItem(dialog, id);
-		int sel = ComboBox_GetCurSel(trackSel);
 		auto& pwTrack = pw_tracks[t];
+		HWND typeSel = GetDlgItem(dialog, ID_PEAK_TYPE1 + t);
+		unsigned int newType = ComboBox_GetCurSel(typeSel);
+		bool typeChanged = newType != pwTrack.levelType;
+		// Don't set pwTrack.levelType here because we might need to reset tracks,
+		// which depends on knowing the old type. We'll set it later.
+
+		HWND trackSel = GetDlgItem(dialog, ID_PEAK_TRACK1 + t);
+		int sel = ComboBox_GetCurSel(trackSel);
+
 		if (sel == PWT_DISABLED) {
 			// Disabled.
 			pw_resetTrack(t);
@@ -271,18 +270,22 @@ void pw_onOk(HWND dialog) {
 			continue;
 		}
 		++pw_numTracksEnabled;
-		auto resetIfTypeChanged = [typeChanged, t] {
+		auto handleTypeChanged = [&] {
 			if (typeChanged) {
 				pw_resetTrack(t);
+				pwTrack.levelType = newType;
 			}
 		};
 		if (sel == PWT_FOLLOW) {
 			// Follow current track.
+			handleTypeChanged();
 			if (pwTrack.follow) {
-				resetIfTypeChanged();
 				continue; // Already following.
 			}
-			pw_resetTrack(t);
+			// handleTypeChanged might have already reset.
+			if (!typeChanged) {
+				pw_resetTrack(t);
+			}
 			pwTrack.follow = true;
 			pwTrack.track = NULL;
 			continue;
@@ -292,16 +295,16 @@ void pw_onOk(HWND dialog) {
 			track = GetMasterTrack(0);
 		else // sel >= PWT_TRACKS_START
 			track = GetTrack(0, sel - PWT_TRACKS_START);
+		handleTypeChanged();
 		if (pwTrack.track != track) {
-			pw_resetTrack(t);
+			// handleTypeChanged might have already reset.
+			if (!typeChanged) {
+				pw_resetTrack(t);
+			}
 			pwTrack.track = track;
 			pwTrack.follow = false;
-		} else {
-			resetIfTypeChanged();
 		}
 	}
-
-	pw_levelType = newType;
 
 	if (pw_numTracksEnabled == 0 && pw_timer) {
 		// Peak watcher disabled completely.
@@ -348,13 +351,6 @@ void cmdPeakWatcher(Command* command) {
 	HWND dialog = CreateDialog(pluginHInstance, MAKEINTRESOURCE(ID_PEAK_WATCHER_DLG), mainHwnd, pw_dialogProc);
 	translateDialog(dialog);
 
-	HWND typeSel = GetDlgItem(dialog, ID_PEAK_TYPE);
-	for (unsigned int type = 0; type < PW_NUM_LEVEL_TYPES; ++type) {
-		WDL_UTF8_HookComboBox(typeSel);
-		ComboBox_AddString(typeSel, translate(PW_LEVEL_TYPES[type].name));
-	}
-	ComboBox_SetCurSel(typeSel, pw_levelType);
-
 	for (int pwt = 0; pwt < PW_NUM_TRACKS; ++pwt) {
 		HWND trackSel = GetDlgItem(dialog, ID_PEAK_TRACK1 + pwt);
 		WDL_UTF8_HookComboBox(trackSel);
@@ -388,6 +384,13 @@ void cmdPeakWatcher(Command* command) {
 			if (!pwTrack.follow && pwTrack.track == track)
 				ComboBox_SetCurSel(trackSel, PWT_TRACKS_START + t);
 		}
+
+		HWND typeSel = GetDlgItem(dialog, ID_PEAK_TYPE1 + pwt);
+		for (unsigned int type = 0; type < PW_NUM_LEVEL_TYPES; ++type) {
+			WDL_UTF8_HookComboBox(typeSel);
+			ComboBox_AddString(typeSel, translate(PW_LEVEL_TYPES[type].name));
+		}
+		ComboBox_SetCurSel(typeSel, pwTrack.levelType);
 	}
 
 	for (int c = 0; c < PW_NUM_CHANNELS; ++c) {

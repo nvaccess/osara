@@ -473,15 +473,15 @@ This can be done for one or two tracks.
 To use Peak Watcher:
 
 1. Press Alt+w (OSARA: View Peak Watcher).
-2. From the Level type combo box, select the type of level you want to use: dB peak or several LUFS options.
- The LUFS options use the JS: EBUR128 Loudness Measurement V2.11 (TBProAudio) effect, which is installed with OSARA.
- OSARA will add the effect to tracks automatically and remove it when it is no longer required.
-3. From the First track combo box, select one of the following:
+2. From the First track combo box, select one of the following:
  - None: Select this if you do not wish to monitor a track.
  - Follow current track: Select this if you want to watch peaks for whatever track you move to in your project.
  - Master: This watches peaks for the master track.
  - Otherwise, you can choose any track in your project.
-4. If you wish to monitor a second track, you can choose another track from the Second track combo box.
+3. From the "Level type for first track" combo box, select the type of level you want to use: dB peak or several LUFS options.
+ The LUFS options use the JS: EBUR128 Loudness Measurement V2.11 (TBProAudio) effect, which is installed with OSARA.
+ OSARA will add the effect to tracks automatically and remove it when it is no longer required.
+4. If you wish to monitor a second track, you can choose another track and desired level type from the subsequent combo boxes.
 5. If you want to be notified when the level of channels exceeds a certain level, in the "Notify automatically for channels:" grouping, check the options for the desired channels and enter the desired level.
 6. The Hold highest level grouping allows you to specify whether the highest level remains as the reported level and for how long.
  Holding the highest level gives you time to examine the highest level, even if the audio level dropped immediately after the highest level occurred.
