@@ -2,7 +2,7 @@
  * OSARA: Open Source Accessibility for the REAPER Application
  * MIDI Editor commands code
  * Author: James Teh <jamie@jantrid.net>
- * Copyright 2015-2017 NV Access Limited
+ * Copyright 2015-2020 NV Access Limited, James Teh
  * License: GNU General Public License version 2.0
  */
 
@@ -218,6 +218,109 @@ void cancelMidiPreviewNotesOff() {
 	}
 }
 
+// A random access iterator for MIDI events.
+// The template parameter is arbitrary and is only used to specialise the
+// template for different event types (note, CC, etc.). We do this instead of
+// subclassing because iterators need to return their exact type, not a base
+// class.
+template<auto eventType>
+class MidiEventIterator {
+	public:
+	using difference_type = int;
+	using value_type = const double;
+	using pointer = void;
+	using reference = void;
+	using iterator_category = random_access_iterator_tag;
+
+	MidiEventIterator(MediaItem_Take* take): take(take) {
+		this->count = this->getCount();
+		this->index = 0;
+	}
+
+	bool operator==(const MidiEventIterator& other) const {
+		return this->take == other.take && this->index == other.index;
+	}
+
+	bool operator!=(const MidiEventIterator& other) const {
+		return !(*this == other);
+	}
+
+	bool operator<(const MidiEventIterator& other) const {
+		return this->index < other.index;
+	}
+
+	bool operator<=(const MidiEventIterator& other) const {
+		return this->index <= other.index;
+	}
+
+	const double operator[](const int index) const {
+		double pos = this->getEvent(this->index + index);
+		return MIDI_GetProjTimeFromPPQPos(take, pos);
+	}
+
+	const double operator*() const {
+		return (*this)[0];
+	}
+
+	MidiEventIterator& operator++() {
+		++this->index;
+		return *this;
+	}
+
+	MidiEventIterator& operator--() {
+		--this->index;
+		return *this;
+	}
+
+	MidiEventIterator& operator+=(const int increment) {
+		this->index += increment;
+		return *this;
+	}
+
+	MidiEventIterator& operator-=(const int decrement) {
+		this->index -= decrement;
+		return *this;
+	}
+
+	int operator-(const MidiEventIterator& other) {
+		return this->index - other.index;
+	}
+
+	void moveToEnd() {
+		this->index = count;
+	}
+
+	int getIndex() const {
+		return this->index;
+	}
+
+	protected:
+	int getCount() const;
+	double getEvent(int index) const;
+	MediaItem_Take* take;
+
+	private:
+	int count;
+	int index;
+};
+
+using MidiNoteIterator = MidiEventIterator<1>;
+
+template<>
+int MidiNoteIterator::getCount() const {
+	int count;
+	MIDI_CountEvts(this->take, &count, nullptr, nullptr);
+	return count;
+}
+
+template<>
+double MidiNoteIterator::getEvent(int index) const {
+	double start;
+	MIDI_GetNote(take, index, nullptr, nullptr, &start, nullptr, nullptr,
+		nullptr, nullptr);
+	return start;
+}
+
 void cmdMidiMoveCursor(Command* command) {
 	HWND editor = MIDIEditor_GetActive();
 	MIDIEditor_OnCommand(editor, command->gaccel.accel.cmd);
@@ -299,49 +402,46 @@ const string getMidiNoteName(MediaItem_Take *take, int pitch, int channel) {
 
 // Returns the indexes of the first and last notes in a chord in a given direction.
 pair<int, int> findChord(MediaItem_Take* take, int direction) {
-	int count;
-	MIDI_CountEvts(take, &count, NULL, NULL);
 	double now = GetCursorPosition();
-	// Find the first note of the chord.
-	int firstNote = direction == -1 ? count - 1 : 0;
-	int movement = direction == 0 ? 1 : direction;
-	bool found = false;
-	int nowNote = -1;
-	double firstStart;
-	for (; 0 <= firstNote && firstNote < count; firstNote += movement) {
-		MIDI_GetNote(take, firstNote, NULL, NULL, &firstStart, NULL, NULL, NULL, NULL);
-		firstStart = MIDI_GetProjTimeFromPPQPos(take, firstStart);
-		if (firstStart == now)
-			nowNote = firstNote;
-		if ((direction == 0 && firstStart == now)
-			|| (direction == 1 && firstStart > now)
-			|| (direction == -1 && firstStart < now)
-		) {
-			found = true;
-			break;
-		}
+	MidiNoteIterator begin(take);
+	MidiNoteIterator end = begin;
+	end.moveToEnd();
+	if (begin == end) {
+		// No notes.
+		return {-1, -1};
 	}
-	if (!found) {
-		if (nowNote != -1) {
-			// No chord in the requested direction, so use the chord at the cursor.
-			firstNote = nowNote;
-			firstStart = now;
-			// Reverse the direction to find the remaining notes in the chord.
-			movement = direction == 1 ? -1 : 1;
-		} else
-			return {-1, -1};
+	auto range = equal_range(begin, end, now);
+	// Find the first note of the chord.
+	MidiNoteIterator firstNote = end;
+	if (direction == 1 && range.second != end) {
+		// Return chord after the cursor.
+		// range.second is the first note after now.
+		firstNote = range.second;
+	} else if (direction == -1 && range.first != begin) {
+		// Return chord before the cursor.
+		// range.first is the first note at or after now, so one before that is
+		// the first note before now.
+		firstNote = range.first;
+		--firstNote;
+	} else if (range.first != range.second) {
+		// Return chord at the cursor.
+		return {range.first.getIndex(), range.second.getIndex() - 1};
+	} else {
+		// Nothing in the requested direction or at the cursor.
+		return {-1, -1};
 	}
 	// Find the last note of the chord.
-	int lastNote = firstNote;
-	for (int note = lastNote + movement; 0 <= note && note < count; note += movement) {
-		double start;
-		MIDI_GetNote(take, note, NULL, NULL, &start, NULL, NULL, NULL, NULL);
-		start = MIDI_GetProjTimeFromPPQPos(take, start);
-		if (start != firstStart)
+	double firstStart = *firstNote;
+	MidiNoteIterator lastNote = firstNote;
+	MidiNoteIterator note = firstNote;
+	for (note += direction; begin <= note && note < end; note += direction) {
+		if (*note != firstStart) {
 			break;
+		}
 		lastNote = note;
 	}
-	return {min(firstNote, lastNote), max(lastNote, firstNote)};
+	return {min(firstNote.getIndex(), lastNote.getIndex()),
+		max(lastNote.getIndex(), firstNote.getIndex())};
 }
 
 // Keeps track of the note to which the user last moved in a chord.
